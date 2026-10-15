@@ -1,18 +1,36 @@
-FROM minio/minio:latest
+FROM golang:1.24.9-alpine3.22 AS build
 
-ARG TARGETARCH
-ARG RELEASE
+# The commit being built and its UTC commit time (2006-01-02T15:04:05Z),
+# which MinIO turns into its version and release tag.
+ARG COMMIT_ID
+ARG COMMIT_TIME
 
-RUN chmod -R 777 /usr/bin
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
 
-COPY ./minio-${TARGETARCH}.${RELEASE} /usr/bin/minio
-COPY ./minio-${TARGETARCH}.${RELEASE}.minisig /usr/bin/minio.minisig
-COPY ./minio-${TARGETARCH}.${RELEASE}.sha256sum /usr/bin/minio.sha256sum
+RUN test -n "$COMMIT_ID" && test -n "$COMMIT_TIME" && \
+    tag="RELEASE.$(echo "$COMMIT_TIME" | tr ':' '-')" && \
+    pkg=github.com/minio/minio/cmd && \
+    CGO_ENABLED=0 go build -tags kqueue -trimpath -o /out/minio --ldflags "-s -w \
+      -X $pkg.Version=$COMMIT_TIME \
+      -X $pkg.CopyrightYear=${COMMIT_TIME%%-*} \
+      -X $pkg.ReleaseTag=$tag \
+      -X $pkg.CommitID=$COMMIT_ID \
+      -X $pkg.ShortCommitID=$(echo "$COMMIT_ID" | cut -c1-12)" && \
+    /out/minio --version
 
-COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+FROM alpine:3.22
 
-ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/minio /usr/bin/minio
+COPY LICENSE /licenses/LICENSE
 
+EXPOSE 9000 9001
 VOLUME ["/data"]
+HEALTHCHECK --interval=10s --timeout=3s --retries=6 \
+  CMD wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live || exit 1
 
-CMD ["minio"]
+ENTRYPOINT ["/usr/bin/minio"]
+CMD ["server", "/data", "--console-address", ":9001"]
